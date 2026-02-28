@@ -66,13 +66,23 @@ impl JmapClient {
     }
 
     async fn call(&self, method: &str, args: Value) -> Result<Value> {
+        let results = self.call_multi(vec![(method, args, "r0")]).await?;
+        Ok(results.into_iter().next().context("empty JMAP response")?)
+    }
+
+    async fn call_multi(&self, calls: Vec<(&str, Value, &str)>) -> Result<Vec<Value>> {
+        let method_calls: Vec<Value> = calls
+            .into_iter()
+            .map(|(method, args, id)| json!([method, args, id]))
+            .collect();
+
         let request = json!({
             "using": [
                 "urn:ietf:params:jmap:core",
                 "urn:ietf:params:jmap:mail",
                 "urn:ietf:params:jmap:submission"
             ],
-            "methodCalls": [[method, args, "r0"]]
+            "methodCalls": method_calls
         });
 
         let resp: JmapResponse = self
@@ -86,18 +96,15 @@ impl JmapClient {
             .json()
             .await?;
 
-        let call = resp
-            .method_responses
-            .into_iter()
-            .next()
-            .context("empty JMAP response")?;
-
-        // call is [method_name, result, call_id]
-        if call[0].as_str() == Some("error") {
-            bail!("JMAP error: {}", call[1]);
+        let mut results = Vec::new();
+        for call in resp.method_responses {
+            if call[0].as_str() == Some("error") {
+                bail!("JMAP error: {}", call[1]);
+            }
+            results.push(call[1].clone());
         }
 
-        Ok(call[1].clone())
+        Ok(results)
     }
 
     pub async fn get_mailboxes(&self) -> Result<Value> {
@@ -151,6 +158,104 @@ impl JmapClient {
             }),
         )
         .await
+    }
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    async fn get_drafts_mailbox_id(&self) -> Result<String> {
+        let result = self.get_mailboxes().await?;
+        result["list"]
+            .as_array()
+            .and_then(|list| {
+                list.iter().find(|m| m["role"].as_str() == Some("drafts"))
+            })
+            .and_then(|m| m["id"].as_str())
+            .map(|s| s.to_string())
+            .context("no drafts mailbox found")
+    }
+
+    async fn get_identity_id(&self) -> Result<String> {
+        let result = self.call("Identity/get", json!({"accountId": self.account_id})).await?;
+        result["list"]
+            .as_array()
+            .and_then(|list| list.first())
+            .and_then(|id| id["id"].as_str())
+            .map(|s| s.to_string())
+            .context("no identity found for this account")
+    }
+
+    pub async fn send_email(
+        &self,
+        from: &str,
+        to: &[String],
+        subject: &str,
+        body: &str,
+        cc: &[String],
+        bcc: &[String],
+    ) -> Result<Value> {
+        let identity_id = self.get_identity_id().await?;
+
+        let to_addrs: Vec<Value> = to.iter().map(|a| json!({"email": a})).collect();
+        let cc_addrs: Vec<Value> = cc.iter().map(|a| json!({"email": a})).collect();
+        let bcc_addrs: Vec<Value> = bcc.iter().map(|a| json!({"email": a})).collect();
+
+        let drafts_id = self.get_drafts_mailbox_id().await?;
+
+        let mut email = json!({
+            "from": [{"email": from}],
+            "to": to_addrs,
+            "subject": subject,
+            "bodyValues": {
+                "body": {
+                    "value": body,
+                    "charset": "utf-8"
+                }
+            },
+            "textBody": [{"partId": "body", "type": "text/plain"}],
+            "mailboxIds": {drafts_id: true}
+        });
+
+        if !cc_addrs.is_empty() {
+            email["cc"] = json!(cc_addrs);
+        }
+        if !bcc_addrs.is_empty() {
+            email["bcc"] = json!(bcc_addrs);
+        }
+
+        let results = self.call_multi(vec![
+            (
+                "Email/set",
+                json!({
+                    "accountId": self.account_id,
+                    "create": {
+                        "draft": email
+                    }
+                }),
+                "r0",
+            ),
+            (
+                "EmailSubmission/set",
+                json!({
+                    "accountId": self.account_id,
+                    "create": {
+                        "send": {
+                            "emailId": "#draft",
+                            "identityId": identity_id
+                        }
+                    },
+                    "onSuccessDestroyEmail": ["#send"]
+                }),
+                "r1",
+            ),
+        ]).await?;
+
+        // Return the submission result
+        results.into_iter().last().context("no submission response")
     }
 }
 

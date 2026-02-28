@@ -42,6 +42,24 @@ pub struct GetEmailsParams {
     pub ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendEmailParams {
+    #[schemars(description = "Recipient email addresses")]
+    pub to: Vec<String>,
+
+    #[schemars(description = "Email subject")]
+    pub subject: String,
+
+    #[schemars(description = "Email body (plain text)")]
+    pub body: String,
+
+    #[schemars(description = "CC recipients (optional)")]
+    pub cc: Option<Vec<String>>,
+
+    #[schemars(description = "BCC recipients (optional)")]
+    pub bcc: Option<Vec<String>>,
+}
+
 #[derive(Clone)]
 pub struct StalwartServer {
     client: Arc<JmapClient>,
@@ -129,6 +147,27 @@ impl StalwartServer {
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }
+
+    #[tool(description = "Send an email via SMTP")]
+    async fn send_email(
+        &self,
+        Parameters(p): Parameters<SendEmailParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.to.is_empty() {
+            return Err(McpError::invalid_params("to must not be empty", None));
+        }
+        let from = self.client.username();
+        let cc = p.cc.unwrap_or_default();
+        let bcc = p.bcc.unwrap_or_default();
+
+        match self.client.send_email(from, &p.to, &p.subject, &p.body, &cc, &bcc).await {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
 }
 
 #[tool_handler]
@@ -145,7 +184,7 @@ impl ServerHandler for StalwartServer {
                 website_url: None,
             },
             instructions: Some(
-                "Stalwart mail server MCP. Tools: get_mailboxes, search_emails, get_emails. \
+                "Stalwart mail server MCP. Tools: get_mailboxes, search_emails, get_emails, send_email. \
                  Search returns email IDs; use get_emails to read content."
                     .into(),
             ),
