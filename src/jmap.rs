@@ -8,6 +8,7 @@ use std::collections::HashMap;
 pub struct JmapClient {
     http: Client,
     api_url: String,
+    upload_url: String,
     username: String,
     password: String,
     account_id: String,
@@ -17,6 +18,7 @@ pub struct JmapClient {
 #[serde(rename_all = "camelCase")]
 struct Session {
     api_url: String,
+    upload_url: String,
     accounts: HashMap<String, AccountInfo>,
     primary_accounts: HashMap<String, String>,
 }
@@ -59,6 +61,7 @@ impl JmapClient {
         Ok(Self {
             http,
             api_url: session.api_url,
+            upload_url: session.upload_url,
             username: username.to_string(),
             password: password.to_string(),
             account_id,
@@ -145,7 +148,6 @@ impl JmapClient {
             "Email/get",
             json!({
                 "accountId": self.account_id,
-                "#ids": { "resultOf": null, "name": null, "path": null },
                 "ids": ids,
                 "properties": [
                     "id", "threadId", "mailboxIds", "from", "to", "cc", "bcc",
@@ -159,6 +161,60 @@ impl JmapClient {
         )
         .await
     }
+    pub async fn create_mailbox(
+        &self,
+        name: &str,
+        parent_id: Option<&str>,
+        role: Option<&str>,
+    ) -> Result<Value> {
+        let mut mailbox = json!({
+            "name": name
+        });
+        if let Some(pid) = parent_id {
+            mailbox["parentId"] = json!(pid);
+        }
+        if let Some(r) = role {
+            mailbox["role"] = json!(r);
+        }
+
+        self.call(
+            "Mailbox/set",
+            json!({
+                "accountId": self.account_id,
+                "create": {
+                    "mb0": mailbox
+                }
+            }),
+        )
+        .await
+    }
+
+    pub async fn upload_blob(&self, data: Vec<u8>, content_type: &str) -> Result<UploadedBlob> {
+        let url = self.upload_url.replace("{accountId}", &self.account_id);
+        let size = data.len() as u64;
+        let resp: Value = self
+            .http
+            .post(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .header("Content-Type", content_type)
+            .body(data)
+            .send()
+            .await
+            .context("blob upload request failed")?
+            .error_for_status()
+            .context("blob upload returned error status")?
+            .json()
+            .await
+            .context("failed to parse blob upload response")?;
+
+        let blob_id = resp["blobId"]
+            .as_str()
+            .context("no blobId in upload response")?
+            .to_string();
+
+        Ok(UploadedBlob { blob_id, size })
+    }
+
     pub fn account_id(&self) -> &str {
         &self.account_id
     }
@@ -197,6 +253,7 @@ impl JmapClient {
         body: &str,
         cc: &[String],
         bcc: &[String],
+        attachments: &[EmailAttachment],
     ) -> Result<Value> {
         let identity_id = self.get_identity_id().await?;
 
@@ -225,6 +282,21 @@ impl JmapClient {
         }
         if !bcc_addrs.is_empty() {
             email["bcc"] = json!(bcc_addrs);
+        }
+        if !attachments.is_empty() {
+            let att_list: Vec<Value> = attachments
+                .iter()
+                .map(|a| {
+                    json!({
+                        "blobId": a.blob_id,
+                        "type": a.content_type,
+                        "name": a.filename,
+                        "size": a.size,
+                        "disposition": "attachment"
+                    })
+                })
+                .collect();
+            email["attachments"] = json!(att_list);
         }
 
         let results = self.call_multi(vec![
@@ -257,6 +329,18 @@ impl JmapClient {
         // Return the submission result
         results.into_iter().last().context("no submission response")
     }
+}
+
+pub struct UploadedBlob {
+    pub blob_id: String,
+    pub size: u64,
+}
+
+pub struct EmailAttachment {
+    pub blob_id: String,
+    pub content_type: String,
+    pub filename: String,
+    pub size: u64,
 }
 
 #[derive(Deserialize)]

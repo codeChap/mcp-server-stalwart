@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::jmap::JmapClient;
+use crate::jmap::{EmailAttachment, JmapClient};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
@@ -58,6 +58,33 @@ pub struct SendEmailParams {
 
     #[schemars(description = "BCC recipients (optional)")]
     pub bcc: Option<Vec<String>>,
+
+    #[schemars(description = "File attachments (optional). Each attachment needs a file path and filename.")]
+    pub attachments: Option<Vec<AttachmentParam>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AttachmentParam {
+    #[schemars(description = "Absolute path to the file on disk")]
+    pub path: String,
+
+    #[schemars(description = "Filename for the attachment (e.g., 'report.pdf')")]
+    pub filename: String,
+
+    #[schemars(description = "MIME type (e.g., 'application/pdf', 'image/png'). Auto-detected from extension if omitted.")]
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateMailboxParams {
+    #[schemars(description = "Name of the mailbox to create")]
+    pub name: String,
+
+    #[schemars(description = "Parent mailbox ID for nesting (optional, top-level if omitted)")]
+    pub parent_id: Option<String>,
+
+    #[schemars(description = "Mailbox role (optional). Standard roles: archive, drafts, inbox, junk, sent, trash")]
+    pub role: Option<String>,
 }
 
 #[derive(Clone)]
@@ -148,7 +175,26 @@ impl StalwartServer {
         }
     }
 
-    #[tool(description = "Send an email via SMTP")]
+    #[tool(description = "Create a new mailbox/folder. Optionally set a role (archive, drafts, junk, sent, trash) \
+                           or nest under a parent mailbox.")]
+    async fn create_mailbox(
+        &self,
+        Parameters(p): Parameters<CreateMailboxParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .client
+            .create_mailbox(&p.name, p.parent_id.as_deref(), p.role.as_deref())
+            .await
+        {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Send an email with optional file attachments")]
     async fn send_email(
         &self,
         Parameters(p): Parameters<SendEmailParams>,
@@ -160,7 +206,26 @@ impl StalwartServer {
         let cc = p.cc.unwrap_or_default();
         let bcc = p.bcc.unwrap_or_default();
 
-        match self.client.send_email(from, &p.to, &p.subject, &p.body, &cc, &bcc).await {
+        let mut uploaded: Vec<EmailAttachment> = Vec::new();
+        for att in p.attachments.unwrap_or_default() {
+            let data = tokio::fs::read(&att.path).await.map_err(|e| {
+                McpError::invalid_params(format!("failed to read '{}': {}", att.path, e), None)
+            })?;
+            let content_type = att
+                .content_type
+                .unwrap_or_else(|| guess_mime(&att.filename));
+            let blob = self.client.upload_blob(data, &content_type).await.map_err(|e| {
+                McpError::internal_error(format!("upload failed for '{}': {}", att.filename, e), None)
+            })?;
+            uploaded.push(EmailAttachment {
+                blob_id: blob.blob_id,
+                content_type,
+                filename: att.filename,
+                size: blob.size,
+            });
+        }
+
+        match self.client.send_email(from, &p.to, &p.subject, &p.body, &cc, &bcc, &uploaded).await {
             Ok(result) => {
                 let text = serde_json::to_string_pretty(&result).unwrap_or_default();
                 Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -170,24 +235,40 @@ impl StalwartServer {
     }
 }
 
+fn guess_mime(filename: &str) -> String {
+    match filename.rsplit('.').next().map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("pdf") => "application/pdf",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("txt") => "text/plain",
+        Some("html" | "htm") => "text/html",
+        Some("csv") => "text/csv",
+        Some("json") => "application/json",
+        Some("xml") => "application/xml",
+        Some("zip") => "application/zip",
+        Some("gz" | "gzip") => "application/gzip",
+        Some("doc") => "application/msword",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 #[tool_handler]
 impl ServerHandler for StalwartServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "stalwart".into(),
-                title: None,
-                version: env!("CARGO_PKG_VERSION").into(),
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
-                "Stalwart mail server MCP. Tools: get_mailboxes, search_emails, get_emails, send_email. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("stalwart", env!("CARGO_PKG_VERSION")))
+            .with_instructions(
+                "Stalwart mail server MCP. Tools: get_mailboxes, create_mailbox, search_emails, get_emails, send_email. \
                  Search returns email IDs; use get_emails to read content."
-                    .into(),
-            ),
-        }
+            )
     }
 }
