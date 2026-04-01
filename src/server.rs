@@ -43,6 +43,12 @@ pub struct GetEmailsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteEmailsParams {
+    #[schemars(description = "List of email IDs to delete")]
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendEmailParams {
     #[schemars(description = "Recipient email addresses")]
     pub to: Vec<String>,
@@ -175,6 +181,23 @@ impl StalwartServer {
         }
     }
 
+    #[tool(description = "Permanently delete emails by ID. This cannot be undone.")]
+    async fn delete_emails(
+        &self,
+        Parameters(p): Parameters<DeleteEmailsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.ids.is_empty() {
+            return Err(McpError::invalid_params("ids must not be empty", None));
+        }
+        match self.client.delete_emails(&p.ids).await {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     #[tool(description = "Create a new mailbox/folder. Optionally set a role (archive, drafts, junk, sent, trash) \
                            or nest under a parent mailbox.")]
     async fn create_mailbox(
@@ -267,8 +290,8 @@ impl ServerHandler for StalwartServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("stalwart", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Stalwart mail server MCP. Tools: get_mailboxes, create_mailbox, search_emails, get_emails, send_email. \
-                 Search returns email IDs; use get_emails to read content."
+                "Stalwart mail server MCP. Tools: get_mailboxes, create_mailbox, search_emails, get_emails, delete_emails, send_email. \
+                 Search returns email IDs; use get_emails to read content or delete_emails to remove them."
             )
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -189,6 +189,17 @@ impl JmapClient {
         .await
     }
 
+    pub async fn delete_emails(&self, ids: &[String]) -> Result<Value> {
+        self.call(
+            "Email/set",
+            json!({
+                "accountId": self.account_id,
+                "destroy": ids
+            }),
+        )
+        .await
+    }
+
     pub async fn upload_blob(&self, data: Vec<u8>, content_type: &str) -> Result<UploadedBlob> {
         let url = self.upload_url.replace("{accountId}", &self.account_id);
         let size = data.len() as u64;
@@ -213,10 +224,6 @@ impl JmapClient {
             .to_string();
 
         Ok(UploadedBlob { blob_id, size })
-    }
-
-    pub fn account_id(&self) -> &str {
-        &self.account_id
     }
 
     pub fn username(&self) -> &str {
