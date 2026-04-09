@@ -9,6 +9,7 @@ pub struct JmapClient {
     http: Client,
     api_url: String,
     upload_url: String,
+    download_url: String,
     username: String,
     password: String,
     account_id: String,
@@ -19,6 +20,7 @@ pub struct JmapClient {
 struct Session {
     api_url: String,
     upload_url: String,
+    download_url: String,
     accounts: HashMap<String, AccountInfo>,
     primary_accounts: HashMap<String, String>,
 }
@@ -62,6 +64,7 @@ impl JmapClient {
             http,
             api_url: session.api_url,
             upload_url: session.upload_url,
+            download_url: session.download_url,
             username: username.to_string(),
             password: password.to_string(),
             account_id,
@@ -230,6 +233,42 @@ impl JmapClient {
         &self.username
     }
 
+    pub async fn get_email_attachments(&self, ids: &[String]) -> Result<Value> {
+        self.call(
+            "Email/get",
+            json!({
+                "accountId": self.account_id,
+                "ids": ids,
+                "properties": ["id", "subject", "attachments"]
+            }),
+        )
+        .await
+    }
+
+    pub async fn download_blob(&self, blob_id: &str, name: &str, content_type: &str) -> Result<Vec<u8>> {
+        let url = self
+            .download_url
+            .replace("{accountId}", &self.account_id)
+            .replace("{blobId}", blob_id)
+            .replace("{name}", name)
+            .replace("{type}", content_type);
+
+        let bytes = self
+            .http
+            .get(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .context("blob download request failed")?
+            .error_for_status()
+            .context("blob download returned error status")?
+            .bytes()
+            .await
+            .context("failed to read blob bytes")?;
+
+        Ok(bytes.to_vec())
+    }
+
     async fn get_drafts_mailbox_id(&self) -> Result<String> {
         let result = self.get_mailboxes().await?;
         result["list"]
@@ -258,6 +297,7 @@ impl JmapClient {
         to: &[String],
         subject: &str,
         body: &str,
+        html_body: Option<&str>,
         cc: &[String],
         bcc: &[String],
         attachments: &[EmailAttachment],
@@ -270,19 +310,29 @@ impl JmapClient {
 
         let drafts_id = self.get_drafts_mailbox_id().await?;
 
+        let body_values = json!({
+            "body": {
+                "value": body,
+                "charset": "utf-8"
+            }
+        });
+
         let mut email = json!({
             "from": [{"email": from}],
             "to": to_addrs,
             "subject": subject,
-            "bodyValues": {
-                "body": {
-                    "value": body,
-                    "charset": "utf-8"
-                }
-            },
+            "bodyValues": body_values,
             "textBody": [{"partId": "body", "type": "text/plain"}],
             "mailboxIds": {drafts_id: true}
         });
+
+        if let Some(html) = html_body {
+            email["bodyValues"]["html"] = json!({
+                "value": html,
+                "charset": "utf-8"
+            });
+            email["htmlBody"] = json!([{"partId": "html", "type": "text/html"}]);
+        }
 
         if !cc_addrs.is_empty() {
             email["cc"] = json!(cc_addrs);
