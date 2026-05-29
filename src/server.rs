@@ -7,7 +7,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::admin::AdminClient;
@@ -36,12 +36,18 @@ pub struct SearchParams {
 
     #[schemars(description = "Maximum results to return (default 10, max 50)")]
     pub limit: Option<u32>,
+
+    #[schemars(description = "Email account to search (e.g. 'portal@excellerate.site'). Omit to use the default account. Requires admin API.")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetEmailsParams {
     #[schemars(description = "List of email IDs to retrieve")]
     pub ids: Vec<String>,
+
+    #[schemars(description = "Email account that owns these emails (e.g. 'portal@excellerate.site'). Omit to use the default account. Requires admin API.")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -126,6 +132,21 @@ pub struct CreateAccountParams {
 
     #[schemars(description = "Disk quota in bytes (0 for unlimited)")]
     pub quota: Option<u64>,
+
+    #[schemars(description = "Permissions to grant at creation (e.g. ['email-send', 'authenticate', 'imap-authenticate']). Newly-created principals start with no permissions and cannot authenticate, send, or receive mail until permissions are granted. Use update_account_permissions afterwards if omitted here.")]
+    pub permissions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateAccountPermissionsParams {
+    #[schemars(description = "Account name (e.g. 'hello@codechap.com')")]
+    pub account: String,
+
+    #[schemars(description = "Action: 'set' replaces the full enabledPermissions list; 'add' grants the listed permissions; 'remove' revokes them. Default 'set'.")]
+    pub action: Option<String>,
+
+    #[schemars(description = "Permission names to set, add, or remove (e.g. ['email-send', 'authenticate', 'imap-authenticate', 'imap-append']).")]
+    pub permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -147,11 +168,46 @@ pub struct ManageAliasesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResetPasswordParams {
+    #[schemars(description = "Account name (e.g. 'hello@codechap.com')")]
+    pub account: String,
+
+    #[schemars(description = "New password. If omitted, a strong 24-character random password is generated and returned.")]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetDsnAccountsParams {
     #[schemars(
         description = "Email addresses that should get delivery reports (SUCCESS + FAILURE DSN). Must have at least one address."
     )]
     pub accounts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckSentParams {
+    #[schemars(
+        description = "Recipient email or domain to look up (substring match, e.g. 'alice@example.com' or 'example.com')"
+    )]
+    pub to: Option<String>,
+
+    #[schemars(description = "Sender email or domain to look up (substring match)")]
+    pub from: Option<String>,
+
+    #[schemars(
+        description = "Free-text filter passed straight to the log search — overrides 'to' and 'from' when set"
+    )]
+    pub filter: Option<String>,
+
+    #[schemars(
+        description = "Only show log events at or after this RFC3339 timestamp (e.g. '2026-05-08T12:00:00Z')"
+    )]
+    pub since: Option<String>,
+
+    #[schemars(
+        description = "Number of raw log rows to scan from the server (default 200, max 1000). Filtering and de-duplication happen client-side after the fetch."
+    )]
+    pub scan_limit: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -169,6 +225,26 @@ impl StalwartServer {
                 None,
             )
         })
+    }
+
+    /// Create a temporary JMAP client authenticated as a different account.
+    /// Looks up the account's password via the admin API.
+    async fn client_for_account(&self, account: &str) -> Result<JmapClient, McpError> {
+        let admin = self.require_admin()?;
+        let details = admin
+            .get_account(account)
+            .await
+            .map_err(|e| McpError::internal_error(format!("failed to look up account '{}': {}", account, e), None))?;
+
+        let password = details["secrets"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::internal_error(format!("no password found for account '{}'", account), None))?;
+
+        JmapClient::connect(self.client.session_url(), account, password)
+            .await
+            .map_err(|e| McpError::internal_error(format!("failed to connect as '{}': {}", account, e), None))
     }
 }
 
@@ -228,7 +304,16 @@ impl StalwartServer {
         let position = p.position.unwrap_or(0);
         let limit = p.limit.unwrap_or(10).min(50);
 
-        match self.client.search_emails(filter, None, position, limit).await {
+        let client: &JmapClient;
+        let temp_client;
+        if let Some(acct) = &p.account {
+            temp_client = self.client_for_account(acct).await?;
+            client = &temp_client;
+        } else {
+            client = &self.client;
+        }
+
+        match client.search_emails(filter, None, position, limit).await {
             Ok(result) => {
                 let text = serde_json::to_string_pretty(&result).unwrap_or_default();
                 Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -246,7 +331,17 @@ impl StalwartServer {
         if p.ids.is_empty() {
             return Err(McpError::invalid_params("ids must not be empty", None));
         }
-        match self.client.get_emails(&p.ids).await {
+
+        let client: &JmapClient;
+        let temp_client;
+        if let Some(acct) = &p.account {
+            temp_client = self.client_for_account(acct).await?;
+            client = &temp_client;
+        } else {
+            client = &self.client;
+        }
+
+        match client.get_emails(&p.ids).await {
             Ok(result) => {
                 let text = serde_json::to_string_pretty(&result).unwrap_or_default();
                 Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -427,6 +522,10 @@ impl StalwartServer {
             principal["description"] = json!(desc);
         }
 
+        if let Some(perms) = &p.permissions {
+            principal["enabledPermissions"] = json!(perms);
+        }
+
         match admin.create_account(principal).await {
             Ok(result) => {
                 let text = serde_json::to_string_pretty(&json!({
@@ -512,6 +611,104 @@ impl StalwartServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(description = "Update an account's enabledPermissions. Newly-created principals start with no permissions \
+                           and cannot authenticate, send, or receive mail until permissions are granted. \
+                           Actions: 'set' replaces the list, 'add' grants, 'remove' revokes. Requires admin API.")]
+    async fn update_account_permissions(
+        &self,
+        Parameters(p): Parameters<UpdateAccountPermissionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let admin = self.require_admin()?;
+
+        let action = p.action.as_deref().unwrap_or("set").to_lowercase();
+
+        let changes: Vec<serde_json::Value> = match action.as_str() {
+            "set" => vec![json!({
+                "action": "set",
+                "field": "enabledPermissions",
+                "value": p.permissions,
+            })],
+            "add" => p.permissions.iter().map(|perm| json!({
+                "action": "addItem",
+                "field": "enabledPermissions",
+                "value": perm,
+            })).collect(),
+            "remove" => p.permissions.iter().map(|perm| json!({
+                "action": "removeItem",
+                "field": "enabledPermissions",
+                "value": perm,
+            })).collect(),
+            _ => return Err(McpError::invalid_params(
+                "action must be 'set', 'add', or 'remove'",
+                None,
+            )),
+        };
+
+        if changes.is_empty() {
+            return Err(McpError::invalid_params(
+                "permissions must not be empty for add/remove actions",
+                None,
+            ));
+        }
+
+        admin
+            .update_account(&p.account, changes)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let updated = admin
+            .get_account(&p.account)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let text = serde_json::to_string_pretty(&json!({
+            "status": "ok",
+            "action": action,
+            "account": p.account,
+            "enabledPermissions": updated["enabledPermissions"],
+        }))
+        .unwrap_or_default();
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Reset an account's password. If 'password' is omitted, a strong random password is generated. \
+                           The new password is returned in plaintext so it can be delivered to the user — handle the response carefully. \
+                           Requires admin API.")]
+    async fn reset_password(
+        &self,
+        Parameters(p): Parameters<ResetPasswordParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let admin = self.require_admin()?;
+
+        let new_password = match p.password {
+            Some(pw) if !pw.is_empty() => pw,
+            _ => generate_password(24).map_err(|e| {
+                McpError::internal_error(format!("failed to generate password: {e}"), None)
+            })?,
+        };
+
+        let changes = vec![json!({
+            "action": "set",
+            "field": "secrets",
+            "value": [&new_password],
+        })];
+
+        admin
+            .update_account(&p.account, changes)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let text = serde_json::to_string_pretty(&json!({
+            "status": "reset",
+            "account": p.account,
+            "password": new_password,
+        }))
+        .unwrap_or_default();
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[tool(description = "List email addresses that have DSN delivery reports enabled (requires admin API)")]
     async fn get_dsn_accounts(&self) -> Result<CallToolResult, McpError> {
         let admin = self.require_admin()?;
@@ -591,6 +788,212 @@ impl StalwartServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(
+        description = "Verify whether an email was sent or delivered by inspecting Stalwart's server logs. \
+                       This is the authoritative answer — searching mailboxes alone misses outbound traffic \
+                       (SMTP submissions are not auto-saved to the sender's Sent folder). Returns delivery \
+                       status events (delivery.delivered, delivery.completed, delivery.failed, etc.) plus \
+                       SMTP submission events (smtp.rcpt-to, queue.queue-message). Filter by recipient/sender \
+                       substring and optional cutoff timestamp."
+    )]
+    async fn check_sent(
+        &self,
+        Parameters(p): Parameters<CheckSentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let admin = self.require_admin()?;
+
+        // Pick a single substring filter for the server-side query. If multiple are provided,
+        // we use the most specific (filter > to > from) for the fetch and apply the others
+        // client-side so the user gets the intersection.
+        let primary_filter: Option<String> = p
+            .filter
+            .clone()
+            .or_else(|| p.to.clone())
+            .or_else(|| p.from.clone());
+
+        let scan_limit = p.scan_limit.unwrap_or(200).clamp(1, 1000);
+
+        let raw = admin
+            .get_logs(primary_filter.as_deref(), scan_limit)
+            .await
+            .map_err(|e| McpError::internal_error(format!("log fetch failed: {e}"), None))?;
+
+        let items = raw["items"].as_array().cloned().unwrap_or_default();
+
+        let to_needle = p.to.as_deref().map(|s| s.to_lowercase());
+        let from_needle = p.from.as_deref().map(|s| s.to_lowercase());
+        let since_cutoff = p.since.as_deref();
+
+        // Subset of event_ids that prove submission attempt or delivery outcome.
+        let relevant_event_prefixes = [
+            "delivery.",        // attempt-end, completed, delivered, failed, dsn-success, dsn-failure
+            "queue.",           // queue-message, message-locked, etc.
+            "smtp.rcpt-to",     // submission RCPT acceptance
+            "smtp.mail-from",   // submission MAIL FROM acceptance
+            "smtp.message-",    // smtp.message-accepted, smtp.message-rejected
+            "smtp.data",        // smtp.data-end-of-message etc.
+            "outgoing-report.", // outbound DSN reports
+            "tls-rpt.",
+            "mta-sts.",
+        ];
+
+        let mut matched: Vec<&Value> = Vec::new();
+        for item in &items {
+            let event_id = item["event_id"].as_str().unwrap_or("").to_lowercase();
+            let details = item["details"].as_str().unwrap_or("").to_lowercase();
+            let timestamp = item["timestamp"].as_str().unwrap_or("");
+
+            // Time filter
+            if let Some(cutoff) = since_cutoff {
+                if !timestamp.is_empty() && timestamp < cutoff {
+                    continue;
+                }
+            }
+
+            // Only events relevant to outbound submission/delivery
+            if !relevant_event_prefixes
+                .iter()
+                .any(|prefix| event_id.starts_with(prefix))
+            {
+                continue;
+            }
+
+            // Apply secondary client-side substring filters
+            if let Some(needle) = &to_needle {
+                if !details.contains(needle) {
+                    continue;
+                }
+            }
+            if let Some(needle) = &from_needle {
+                if !details.contains(needle) {
+                    continue;
+                }
+            }
+
+            matched.push(item);
+        }
+
+        // Roll up by queueId so a single send shows as one record with its event timeline
+        use std::collections::BTreeMap;
+        let queue_id_re = regex::Regex::new(r#"queueId = (\d+)"#).unwrap();
+        let from_re = regex::Regex::new(r#"from = "([^"]+)""#).unwrap();
+        let to_re = regex::Regex::new(r#"to = (?:\[([^\]]+)\]|"([^"]+)")"#).unwrap();
+        let code_re = regex::Regex::new(r#"code = (\d+)"#).unwrap();
+        let host_re = regex::Regex::new(r#"hostname = "([^"]+)""#).unwrap();
+
+        // queue_id -> aggregated record
+        let mut groups: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
+        let mut orphans: Vec<Value> = Vec::new();
+
+        for item in &matched {
+            let details = item["details"].as_str().unwrap_or("");
+            let timestamp = item["timestamp"].as_str().unwrap_or("");
+            let event = item["event"].as_str().unwrap_or("");
+            let event_id = item["event_id"].as_str().unwrap_or("");
+
+            let qid = queue_id_re
+                .captures(details)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string());
+
+            let summary_event = json!({
+                "timestamp": timestamp,
+                "event_id": event_id,
+                "event": event,
+                "code": code_re.captures(details).and_then(|c| c.get(1)).map(|m| m.as_str()),
+                "hostname": host_re.captures(details).and_then(|c| c.get(1)).map(|m| m.as_str()),
+            });
+
+            let Some(qid) = qid else {
+                orphans.push(json!({
+                    "timestamp": timestamp,
+                    "event_id": event_id,
+                    "event": event,
+                    "details": details,
+                }));
+                continue;
+            };
+
+            let group = groups.entry(qid.clone()).or_insert_with(|| {
+                let mut m = serde_json::Map::new();
+                m.insert("queue_id".into(), json!(qid));
+                m.insert(
+                    "from".into(),
+                    json!(from_re
+                        .captures(details)
+                        .and_then(|c| c.get(1))
+                        .map(|m| m.as_str())),
+                );
+                m.insert(
+                    "to".into(),
+                    json!(to_re
+                        .captures(details)
+                        .and_then(|c| c.get(1).or(c.get(2)))
+                        .map(|m| m.as_str().trim().trim_matches('"'))),
+                );
+                m.insert("events".into(), json!([]));
+                m.insert("first_seen".into(), json!(timestamp));
+                m.insert("last_seen".into(), json!(timestamp));
+                m.insert("delivered".into(), json!(false));
+                m.insert("failed".into(), json!(false));
+                m
+            });
+
+            // Update first/last seen (logs come newest-first; we widen the range)
+            let first = group
+                .get("first_seen")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let last = group
+                .get("last_seen")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if timestamp < first.as_str() || first.is_empty() {
+                group.insert("first_seen".into(), json!(timestamp));
+            }
+            if timestamp > last.as_str() {
+                group.insert("last_seen".into(), json!(timestamp));
+            }
+
+            if event_id == "delivery.delivered" || event_id == "delivery.completed" {
+                group.insert("delivered".into(), json!(true));
+            }
+            if event_id == "delivery.failed" || event_id == "delivery.bounce" {
+                group.insert("failed".into(), json!(true));
+            }
+
+            if let Some(events_arr) = group
+                .get_mut("events")
+                .and_then(|v: &mut Value| v.as_array_mut())
+            {
+                events_arr.push(summary_event);
+            }
+        }
+
+        let messages: Vec<Value> = groups.into_values().map(Value::Object).collect();
+
+        let total_delivered = messages.iter().filter(|m| m["delivered"].as_bool().unwrap_or(false)).count();
+        let total_failed = messages.iter().filter(|m| m["failed"].as_bool().unwrap_or(false)).count();
+
+        let summary = json!({
+            "scanned_log_rows": items.len(),
+            "primary_filter": primary_filter,
+            "to_filter": p.to,
+            "from_filter": p.from,
+            "since": p.since,
+            "messages_found": messages.len(),
+            "delivered_count": total_delivered,
+            "failed_count": total_failed,
+            "messages": messages,
+            "orphan_events": orphans,
+        });
+
+        let text = serde_json::to_string_pretty(&summary).unwrap_or_default();
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[tool(description = "Send an email with optional file attachments")]
     async fn send_email(
         &self,
@@ -632,6 +1035,21 @@ impl StalwartServer {
     }
 }
 
+/// Generate a random password from /dev/urandom.
+///
+/// Uses a 64-character alphanumeric charset so modulo distribution is uniform.
+fn generate_password(len: usize) -> std::io::Result<String> {
+    use std::io::Read;
+    const CHARS: &[u8] =
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+    let mut bytes = vec![0u8; len];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes
+        .iter()
+        .map(|&b| CHARS[(b as usize) % CHARS.len()] as char)
+        .collect())
+}
+
 fn guess_mime(filename: &str) -> String {
     match filename.rsplit('.').next().map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("pdf") => "application/pdf",
@@ -666,9 +1084,12 @@ impl ServerHandler for StalwartServer {
             .with_instructions(
                 "Stalwart mail server MCP. Tools: get_mailboxes, create_mailbox, search_emails, get_emails, delete_emails, send_email, download_attachments. \
                  Search returns email IDs; use get_emails to read content, delete_emails to remove them, or download_attachments to save attachments to disk. \
-                 Admin tools (require STALWART_ADMIN_URL/PASSWORD): create_account creates a new account, \
+                 Admin tools (require STALWART_ADMIN_URL/PASSWORD): create_account creates a new account \
+                 (optionally with a permissions list — without permissions, new accounts cannot authenticate or submit mail), \
                  list_accounts lists all accounts or gets details for one, \
                  manage_aliases adds/removes email aliases on an account, \
+                 update_account_permissions manages the enabledPermissions list on an account (set/add/remove), \
+                 reset_password sets a new account password (auto-generates one if omitted), \
                  get_dsn_accounts lists addresses with delivery reports enabled, set_dsn_accounts updates the list."
             )
     }

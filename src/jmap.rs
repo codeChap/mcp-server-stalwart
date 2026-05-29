@@ -7,6 +7,7 @@ use std::collections::HashMap;
 #[derive(Clone)]
 pub struct JmapClient {
     http: Client,
+    session_url: String,
     api_url: String,
     upload_url: String,
     download_url: String,
@@ -62,6 +63,7 @@ impl JmapClient {
 
         Ok(Self {
             http,
+            session_url: session_url.to_string(),
             api_url: session.api_url,
             upload_url: session.upload_url,
             download_url: session.download_url,
@@ -233,6 +235,10 @@ impl JmapClient {
         &self.username
     }
 
+    pub fn session_url(&self) -> &str {
+        &self.session_url
+    }
+
     pub async fn get_email_attachments(&self, ids: &[String]) -> Result<Value> {
         self.call(
             "Email/get",
@@ -269,16 +275,24 @@ impl JmapClient {
         Ok(bytes.to_vec())
     }
 
-    async fn get_drafts_mailbox_id(&self) -> Result<String> {
+    async fn get_mailbox_id_by_role(&self, role: &str) -> Result<Option<String>> {
         let result = self.get_mailboxes().await?;
-        result["list"]
+        Ok(result["list"]
             .as_array()
-            .and_then(|list| {
-                list.iter().find(|m| m["role"].as_str() == Some("drafts"))
-            })
+            .and_then(|list| list.iter().find(|m| m["role"].as_str() == Some(role)))
             .and_then(|m| m["id"].as_str())
+            .map(|s| s.to_string()))
+    }
+
+    async fn ensure_mailbox_with_role(&self, role: &str, name: &str) -> Result<String> {
+        if let Some(id) = self.get_mailbox_id_by_role(role).await? {
+            return Ok(id);
+        }
+        let result = self.create_mailbox(name, None, Some(role)).await?;
+        result["created"]["mb0"]["id"]
+            .as_str()
             .map(|s| s.to_string())
-            .context("no drafts mailbox found")
+            .with_context(|| format!("failed to create {role} mailbox"))
     }
 
     async fn get_identity_id(&self) -> Result<String> {
@@ -308,7 +322,11 @@ impl JmapClient {
         let cc_addrs: Vec<Value> = cc.iter().map(|a| json!({"email": a})).collect();
         let bcc_addrs: Vec<Value> = bcc.iter().map(|a| json!({"email": a})).collect();
 
-        let drafts_id = self.get_drafts_mailbox_id().await?;
+        let drafts_id = self
+            .get_mailbox_id_by_role("drafts")
+            .await?
+            .context("no drafts mailbox found")?;
+        let sent_id = self.ensure_mailbox_with_role("sent", "Sent").await?;
 
         let body_values = json!({
             "body": {
@@ -323,7 +341,7 @@ impl JmapClient {
             "subject": subject,
             "bodyValues": body_values,
             "textBody": [{"partId": "body", "type": "text/plain"}],
-            "mailboxIds": {drafts_id: true}
+            "mailboxIds": {drafts_id.clone(): true}
         });
 
         if let Some(html) = html_body {
@@ -377,7 +395,13 @@ impl JmapClient {
                             "identityId": identity_id
                         }
                     },
-                    "onSuccessDestroyEmail": ["#send"]
+                    "onSuccessUpdateEmail": {
+                        "#send": {
+                            format!("mailboxIds/{drafts_id}"): Value::Null,
+                            format!("mailboxIds/{sent_id}"): true,
+                            "keywords/$seen": true,
+                        }
+                    }
                 }),
                 "r1",
             ),

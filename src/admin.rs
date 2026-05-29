@@ -171,6 +171,37 @@ impl AdminClient {
         Ok(parsed)
     }
 
+    /// Fetch server log events, optionally filtered by free-text substring match.
+    ///
+    /// Stalwart's `GET /api/logs` returns events that include SMTP submission,
+    /// queue handling, and outbound delivery — the only authoritative source
+    /// for "did this message actually leave the server".
+    pub async fn get_logs(&self, filter: Option<&str>, limit: u32) -> Result<Value> {
+        let url = format!("{}/logs", self.api_url);
+        let limit_str = limit.to_string();
+        let mut query: Vec<(&str, &str)> = vec![("limit", &limit_str)];
+        if let Some(f) = filter {
+            if !f.is_empty() {
+                query.push(("filter", f));
+            }
+        }
+        let resp: Value = self
+            .http
+            .get(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .query(&query)
+            .send()
+            .await
+            .context("admin API request failed")?
+            .error_for_status()
+            .context("admin API returned error status")?
+            .json()
+            .await
+            .context("failed to parse admin API response")?;
+
+        Ok(resp["data"].clone())
+    }
+
     /// Insert or update settings via the admin API.
     ///
     /// Takes key-value pairs and sends them as an insert operation.
