@@ -1,7 +1,10 @@
 mod admin;
+mod check_sent;
 mod jmap;
+mod params;
 mod server;
 mod sieve;
+mod util;
 
 use anyhow::{Context, Result};
 use rmcp::{ServiceExt, transport::stdio};
@@ -22,7 +25,20 @@ async fn main() -> Result<()> {
     let admin = match (env::var("STALWART_ADMIN_URL"), env::var("STALWART_ADMIN_PASSWORD")) {
         (Ok(url), Ok(pass)) => {
             let user = env::var("STALWART_ADMIN_USER").unwrap_or_else(|_| "admin".into());
-            Some(AdminClient::connect(&url, &user, &pass).await?)
+            // A failed admin connection (e.g. the box is briefly unreachable at
+            // spawn time) must NOT abort startup — that would drop every tool,
+            // including the JMAP ones, and leave the agent with no way to reach
+            // the server at all. Degrade gracefully: warn and run without admin.
+            match AdminClient::connect(&url, &user, &pass).await {
+                Ok(client) => Some(client),
+                Err(e) => {
+                    eprintln!(
+                        "warning: Stalwart admin API unavailable ({e:#}); \
+                         admin tools (including check_sent) will be disabled this session"
+                    );
+                    None
+                }
+            }
         }
         _ => None,
     };

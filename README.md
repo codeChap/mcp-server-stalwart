@@ -31,9 +31,18 @@ The server connects via stdio and is configured through environment variables.
 
 | Variable | Description |
 |----------|-------------|
-| `STALWART_ADMIN_URL` | Admin API base URL (e.g. `https://mail.example.com`) |
+| `STALWART_ADMIN_URL` | Admin API base URL — `https://mail.example.com` **or** `https://mail.example.com/api` (both accepted; `/api` is normalized) |
 | `STALWART_ADMIN_USER` | Admin username (default: `admin`) |
-| `STALWART_ADMIN_PASSWORD` | Admin password |
+| `STALWART_ADMIN_PASSWORD` | **Admin** password (different principal from mailbox passwords) |
+
+### Password gotcha (learned the hard way)
+
+| Secret | Used for | NOT used for |
+|--------|----------|--------------|
+| `JMAP_PASSWORD` / mailbox password | SMTP submission (`smtp://user:pass@host:587`), JMAP, IMAP for that account | Admin API |
+| `STALWART_ADMIN_PASSWORD` | Admin API (`/api/principal`, `/api/logs`, …) | App mailer DSNs |
+
+If an app (invoice mailer, WordPress, etc.) is configured with the admin password as the SMTP secret, Stalwart returns **`535 Authentication credentials invalid`** and **nothing is queued**. `check_sent` will correctly show zero submissions. Use `verify_account_auth` to test credentials before chasing delivery.
 
 ## Claude Code MCP config
 
@@ -194,16 +203,36 @@ Set which email addresses receive DSN delivery reports (SUCCESS + FAILURE). Repl
 
 ### check_sent (admin)
 
-Verify whether an email actually left the server. Reads Stalwart's `/api/logs` (the only authoritative source) and groups events by `queueId` so each send becomes one record showing submission → delivery attempt → final status (`delivery.delivered`, `delivery.failed`, etc.). Mailbox searches alone miss outbound traffic — SMTP submissions are not auto-saved to the sender's Sent folder.
+**The first tool to reach for when verifying any outbound email** — contact forms, WordPress `wp_mail()`, invoice/statement mailers, password resets, transactional mail — anything needing *"did this leave the server?"*.
 
-Pass `to` and/or `from` substrings to filter; the tool will pick the most specific server-side filter and apply the rest client-side. Use `since` (RFC3339) to limit how far back to look.
+Reads Stalwart's `/api/logs` (authoritative) and groups by `queueId`: submission → delivery attempt → final status (`delivery.delivered` / `delivery.dsn-success` / `delivery.failed`) plus upstream MX `code`/`hostname`.
+
+**Do NOT search mailboxes first** — SMTP submissions are not auto-saved to Sent. Start here.
+
+**How the log fetch works (production lesson):**  
+Stalwart's server-side `filter=` query often **hangs** on multi-GB daily log files. By default this tool fetches the newest `scan_limit` rows **unfiltered** and applies `to`/`from`/`filter` **client-side** (fast: ~300ms for 1000 rows). Pass `use_server_filter=true` only if you know you need it (e.g. a unique queueId on a quiet host).
+
+Common use cases:
+- "Did the invoice mailer / contact form send to `ap@client.com`?"
+- "Was a transactional email delivered — what did Gmail return?"
+- "Why bounce — remote SMTP code?"
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `to` | string | no | Recipient email or domain (substring match) |
-| `from` | string | no | Sender email or domain (substring match) |
-| `filter` | string | no | Free-text filter passed straight to the log search; overrides `to`/`from` for the fetch |
-| `since` | string | no | Only show events at or after this RFC3339 timestamp |
-| `scan_limit` | number | no | Raw log rows to scan from the server (default 200, max 1000) |
+| `to` | string | no | Recipient email or domain (client-side substring). Prefer this for contact-form checks. |
+| `from` | string | no | Sender email or domain (client-side substring). |
+| `filter` | string | no | Extra client-side substring (e.g. queueId). |
+| `since` | string | no | RFC3339 lower bound on event timestamps. |
+| `scan_limit` | number | no | Newest log rows to fetch (default 500, max 5000). Raise if the send is older than the window. |
+| `use_server_filter` | bool | no | Default `false`. If `true`, pass filter to Stalwart (can timeout on busy hosts). |
 
-Returns a JSON object with `messages_found`, `delivered_count`, `failed_count`, and per-message timelines including the upstream MX `code`/`hostname` so you can confirm Gmail/etc. accepted it.
+Returns `messages_found`, `delivered_count`, `failed_count`, per-message timelines (`mx_code` / `mx_hostname`), plus `auth_events` (submission auth success/failure) and a `log_window`.
+
+### verify_account_auth
+
+Test whether a username/password is accepted by Stalwart (same secret as SMTP port 587). Use when `check_sent` shows **no submission** — usually the app has the wrong password.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `username` | string | yes | Account email (e.g. `hello@codechap.com`) |
+| `password` | string | yes | Candidate password (mailbox secret, **not** admin) |

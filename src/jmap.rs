@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct JmapClient {
@@ -35,8 +36,13 @@ struct AccountInfo {
 
 impl JmapClient {
     pub async fn connect(session_url: &str, username: &str, password: &str) -> Result<Self> {
+        // A tight connect timeout stops a dead/slow server from hanging the tool
+        // call forever; the overall timeout is generous so large attachment
+        // uploads/downloads still complete.
         let http = Client::builder()
             .user_agent("mcp-server-stalwart/0.1.0")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
             .build()?;
 
         let session: Session = http
@@ -166,6 +172,7 @@ impl JmapClient {
         )
         .await
     }
+
     pub async fn create_mailbox(
         &self,
         name: &str,
