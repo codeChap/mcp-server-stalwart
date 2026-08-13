@@ -2,6 +2,7 @@ mod admin;
 mod check_sent;
 mod jmap;
 mod params;
+mod secrets;
 mod server;
 mod sieve;
 mod util;
@@ -22,7 +23,10 @@ async fn main() -> Result<()> {
 
     let client = JmapClient::connect(&session_url, &username, &password).await?;
 
-    let admin = match (env::var("STALWART_ADMIN_URL"), env::var("STALWART_ADMIN_PASSWORD")) {
+    let admin = match (
+        env::var("STALWART_ADMIN_URL"),
+        env::var("STALWART_ADMIN_PASSWORD"),
+    ) {
         (Ok(url), Ok(pass)) => {
             let user = env::var("STALWART_ADMIN_USER").unwrap_or_else(|_| "admin".into());
             // A failed admin connection (e.g. the box is briefly unreachable at
@@ -43,7 +47,15 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    let server = StalwartServer::new(client, admin);
+    let mailbox_passwords = secrets::load_from_env()?;
+    if !mailbox_passwords.is_empty() {
+        eprintln!(
+            "loaded {} extra mailbox password(s) from JMAP_SECRETS_FILE / JMAP_ACCOUNTS",
+            mailbox_passwords.len()
+        );
+    }
+
+    let server = StalwartServer::new(client, admin, mailbox_passwords);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())

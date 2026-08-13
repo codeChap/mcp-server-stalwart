@@ -3,7 +3,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::time::Duration;
+
+use crate::util::http_client;
 
 #[derive(Clone)]
 pub struct JmapClient {
@@ -39,11 +40,7 @@ impl JmapClient {
         // A tight connect timeout stops a dead/slow server from hanging the tool
         // call forever; the overall timeout is generous so large attachment
         // uploads/downloads still complete.
-        let http = Client::builder()
-            .user_agent("mcp-server-stalwart/0.1.0")
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
-            .build()?;
+        let http = http_client(10, 300)?;
 
         let session: Session = http
             .get(session_url)
@@ -139,7 +136,8 @@ impl JmapClient {
         position: u32,
         limit: u32,
     ) -> Result<Value> {
-        let sort = sort.unwrap_or_else(|| json!([{"property": "receivedAt", "isAscending": false}]));
+        let sort =
+            sort.unwrap_or_else(|| json!([{"property": "receivedAt", "isAscending": false}]));
 
         self.call(
             "Email/query",
@@ -258,7 +256,12 @@ impl JmapClient {
         .await
     }
 
-    pub async fn download_blob(&self, blob_id: &str, name: &str, content_type: &str) -> Result<Vec<u8>> {
+    pub async fn download_blob(
+        &self,
+        blob_id: &str,
+        name: &str,
+        content_type: &str,
+    ) -> Result<Vec<u8>> {
         let url = self
             .download_url
             .replace("{accountId}", &self.account_id)
@@ -303,7 +306,9 @@ impl JmapClient {
     }
 
     async fn get_identity_id(&self) -> Result<String> {
-        let result = self.call("Identity/get", json!({"accountId": self.account_id})).await?;
+        let result = self
+            .call("Identity/get", json!({"accountId": self.account_id}))
+            .await?;
         result["list"]
             .as_array()
             .and_then(|list| list.first())
@@ -312,107 +317,49 @@ impl JmapClient {
             .context("no identity found for this account")
     }
 
-    pub async fn send_email(
-        &self,
-        from: &str,
-        to: &[String],
-        subject: &str,
-        body: &str,
-        html_body: Option<&str>,
-        cc: &[String],
-        bcc: &[String],
-        attachments: &[EmailAttachment],
-    ) -> Result<Value> {
+    pub async fn send_email(&self, msg: &OutgoingEmail<'_>) -> Result<Value> {
         let identity_id = self.get_identity_id().await?;
-
-        let to_addrs: Vec<Value> = to.iter().map(|a| json!({"email": a})).collect();
-        let cc_addrs: Vec<Value> = cc.iter().map(|a| json!({"email": a})).collect();
-        let bcc_addrs: Vec<Value> = bcc.iter().map(|a| json!({"email": a})).collect();
-
         let drafts_id = self
             .get_mailbox_id_by_role("drafts")
             .await?
             .context("no drafts mailbox found")?;
         let sent_id = self.ensure_mailbox_with_role("sent", "Sent").await?;
+        let email = build_outgoing_email(msg, &drafts_id);
 
-        let body_values = json!({
-            "body": {
-                "value": body,
-                "charset": "utf-8"
-            }
-        });
-
-        let mut email = json!({
-            "from": [{"email": from}],
-            "to": to_addrs,
-            "subject": subject,
-            "bodyValues": body_values,
-            "textBody": [{"partId": "body", "type": "text/plain"}],
-            "mailboxIds": {drafts_id.clone(): true}
-        });
-
-        if let Some(html) = html_body {
-            email["bodyValues"]["html"] = json!({
-                "value": html,
-                "charset": "utf-8"
-            });
-            email["htmlBody"] = json!([{"partId": "html", "type": "text/html"}]);
-        }
-
-        if !cc_addrs.is_empty() {
-            email["cc"] = json!(cc_addrs);
-        }
-        if !bcc_addrs.is_empty() {
-            email["bcc"] = json!(bcc_addrs);
-        }
-        if !attachments.is_empty() {
-            let att_list: Vec<Value> = attachments
-                .iter()
-                .map(|a| {
+        let results = self
+            .call_multi(vec![
+                (
+                    "Email/set",
                     json!({
-                        "blobId": a.blob_id,
-                        "type": a.content_type,
-                        "name": a.filename,
-                        "size": a.size,
-                        "disposition": "attachment"
-                    })
-                })
-                .collect();
-            email["attachments"] = json!(att_list);
-        }
-
-        let results = self.call_multi(vec![
-            (
-                "Email/set",
-                json!({
-                    "accountId": self.account_id,
-                    "create": {
-                        "draft": email
-                    }
-                }),
-                "r0",
-            ),
-            (
-                "EmailSubmission/set",
-                json!({
-                    "accountId": self.account_id,
-                    "create": {
-                        "send": {
-                            "emailId": "#draft",
-                            "identityId": identity_id
+                        "accountId": self.account_id,
+                        "create": {
+                            "draft": email
                         }
-                    },
-                    "onSuccessUpdateEmail": {
-                        "#send": {
-                            format!("mailboxIds/{drafts_id}"): Value::Null,
-                            format!("mailboxIds/{sent_id}"): true,
-                            "keywords/$seen": true,
+                    }),
+                    "r0",
+                ),
+                (
+                    "EmailSubmission/set",
+                    json!({
+                        "accountId": self.account_id,
+                        "create": {
+                            "send": {
+                                "emailId": "#draft",
+                                "identityId": identity_id
+                            }
+                        },
+                        "onSuccessUpdateEmail": {
+                            "#send": {
+                                format!("mailboxIds/{drafts_id}"): Value::Null,
+                                format!("mailboxIds/{sent_id}"): true,
+                                "keywords/$seen": true,
+                            }
                         }
-                    }
-                }),
-                "r1",
-            ),
-        ]).await?;
+                    }),
+                    "r1",
+                ),
+            ])
+            .await?;
 
         // Return the submission result
         results.into_iter().last().context("no submission response")
@@ -431,8 +378,136 @@ pub struct EmailAttachment {
     pub size: u64,
 }
 
+pub struct OutgoingEmail<'a> {
+    pub from: &'a str,
+    pub to: &'a [String],
+    pub subject: &'a str,
+    pub body: &'a str,
+    pub html_body: Option<&'a str>,
+    pub cc: &'a [String],
+    pub bcc: &'a [String],
+    pub attachments: &'a [EmailAttachment],
+}
+
+fn address_list(addrs: &[String]) -> Vec<Value> {
+    addrs.iter().map(|a| json!({"email": a})).collect()
+}
+
+fn build_outgoing_email(msg: &OutgoingEmail<'_>, drafts_id: &str) -> Value {
+    let to_addrs = address_list(msg.to);
+    let cc_addrs = address_list(msg.cc);
+    let bcc_addrs = address_list(msg.bcc);
+
+    let mut email = json!({
+        "from": [{"email": msg.from}],
+        "to": to_addrs,
+        "subject": msg.subject,
+        "bodyValues": {
+            "body": {
+                "value": msg.body,
+                "charset": "utf-8"
+            }
+        },
+        "textBody": [{"partId": "body", "type": "text/plain"}],
+        "mailboxIds": {drafts_id: true}
+    });
+
+    if let Some(html) = msg.html_body {
+        email["bodyValues"]["html"] = json!({
+            "value": html,
+            "charset": "utf-8"
+        });
+        email["htmlBody"] = json!([{"partId": "html", "type": "text/html"}]);
+    }
+
+    if !cc_addrs.is_empty() {
+        email["cc"] = json!(cc_addrs);
+    }
+    if !bcc_addrs.is_empty() {
+        email["bcc"] = json!(bcc_addrs);
+    }
+    if !msg.attachments.is_empty() {
+        let att_list: Vec<Value> = msg
+            .attachments
+            .iter()
+            .map(|a| {
+                json!({
+                    "blobId": a.blob_id,
+                    "type": a.content_type,
+                    "name": a.filename,
+                    "size": a.size,
+                    "disposition": "attachment"
+                })
+            })
+            .collect();
+        email["attachments"] = json!(att_list);
+    }
+
+    email
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JmapResponse {
     method_responses: Vec<Vec<Value>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample<'a>(
+        to: &'a [String],
+        html: Option<&'a str>,
+        cc: &'a [String],
+        bcc: &'a [String],
+        attachments: &'a [EmailAttachment],
+    ) -> OutgoingEmail<'a> {
+        OutgoingEmail {
+            from: "from@x.com",
+            to,
+            subject: "Hi",
+            body: "plain",
+            html_body: html,
+            cc,
+            bcc,
+            attachments,
+        }
+    }
+
+    #[test]
+    fn outgoing_email_plain_html_and_cc() {
+        let to = vec!["to@y.com".into()];
+        let cc = vec!["cc@z.com".into()];
+        let email = build_outgoing_email(
+            &sample(&to, Some("<b>html</b>"), &cc, &[], &[]),
+            "drafts-id",
+        );
+        assert_eq!(email["from"][0]["email"], "from@x.com");
+        assert_eq!(email["to"][0]["email"], "to@y.com");
+        assert_eq!(email["cc"][0]["email"], "cc@z.com");
+        assert!(email.get("bcc").is_none());
+        assert_eq!(email["bodyValues"]["body"]["value"], "plain");
+        assert_eq!(email["bodyValues"]["html"]["value"], "<b>html</b>");
+        assert_eq!(email["htmlBody"][0]["partId"], "html");
+        assert_eq!(email["mailboxIds"]["drafts-id"], true);
+        assert!(email.get("attachments").is_none());
+    }
+
+    #[test]
+    fn outgoing_email_with_attachment() {
+        let to = vec!["to@y.com".into()];
+        let bcc = vec!["bcc@z.com".into()];
+        let attachments = [EmailAttachment {
+            blob_id: "b1".into(),
+            content_type: "application/pdf".into(),
+            filename: "a.pdf".into(),
+            size: 12,
+        }];
+        let email = build_outgoing_email(&sample(&to, None, &[], &bcc, &attachments), "d0");
+        assert_eq!(email["bcc"][0]["email"], "bcc@z.com");
+        assert_eq!(email["attachments"][0]["blobId"], "b1");
+        assert_eq!(email["attachments"][0]["disposition"], "attachment");
+        assert!(email.get("htmlBody").is_none());
+    }
 }

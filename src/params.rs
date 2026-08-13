@@ -3,6 +3,10 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+const ACCOUNT_PARAM: &str = "Mailbox to act as (e.g. 'hello@codechap.com'). \
+    Omit for the default JMAP account. Password comes from JMAP_SECRETS_FILE / JMAP_ACCOUNTS, \
+    then the admin API. Does not require admin if the password is in the secrets file.";
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
     #[schemars(description = "Text to search for in email subject, body, from, to fields")]
@@ -26,7 +30,7 @@ pub struct SearchParams {
     #[schemars(description = "Maximum results to return (default 10, max 50)")]
     pub limit: Option<u32>,
 
-    #[schemars(description = "Email account to search (e.g. 'portal@excellerate.site'). Omit to use the default account. Requires admin API.")]
+    #[schemars(description = ACCOUNT_PARAM)]
     pub account: Option<String>,
 }
 
@@ -35,7 +39,7 @@ pub struct GetEmailsParams {
     #[schemars(description = "List of email IDs to retrieve")]
     pub ids: Vec<String>,
 
-    #[schemars(description = "Email account that owns these emails (e.g. 'portal@excellerate.site'). Omit to use the default account. Requires admin API.")]
+    #[schemars(description = ACCOUNT_PARAM)]
     pub account: Option<String>,
 }
 
@@ -43,6 +47,9 @@ pub struct GetEmailsParams {
 pub struct DeleteEmailsParams {
     #[schemars(description = "List of email IDs to delete")]
     pub ids: Vec<String>,
+
+    #[schemars(description = ACCOUNT_PARAM)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -56,7 +63,9 @@ pub struct SendEmailParams {
     #[schemars(description = "Email body (plain text)")]
     pub body: String,
 
-    #[schemars(description = "Email body as HTML (optional). When provided, the email is sent as multipart with both plain text and HTML parts.")]
+    #[schemars(
+        description = "Email body as HTML (optional). When provided, the email is sent as multipart with both plain text and HTML parts."
+    )]
     pub html_body: Option<String>,
 
     #[schemars(description = "CC recipients (optional)")]
@@ -65,8 +74,13 @@ pub struct SendEmailParams {
     #[schemars(description = "BCC recipients (optional)")]
     pub bcc: Option<Vec<String>>,
 
-    #[schemars(description = "File attachments (optional). Each attachment needs a file path and filename.")]
+    #[schemars(
+        description = "File attachments (optional). Each attachment needs a file path and filename."
+    )]
     pub attachments: Option<Vec<AttachmentParam>>,
+
+    #[schemars(description = ACCOUNT_PARAM)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -77,7 +91,9 @@ pub struct AttachmentParam {
     #[schemars(description = "Filename for the attachment (e.g., 'report.pdf')")]
     pub filename: String,
 
-    #[schemars(description = "MIME type (e.g., 'application/pdf', 'image/png'). Auto-detected from extension if omitted.")]
+    #[schemars(
+        description = "MIME type (e.g., 'application/pdf', 'image/png'). Auto-detected from extension if omitted."
+    )]
     pub content_type: Option<String>,
 }
 
@@ -88,6 +104,9 @@ pub struct DownloadAttachmentsParams {
 
     #[schemars(description = "Directory path to save attachments to")]
     pub download_dir: String,
+
+    #[schemars(description = ACCOUNT_PARAM)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -98,8 +117,13 @@ pub struct CreateMailboxParams {
     #[schemars(description = "Parent mailbox ID for nesting (optional, top-level if omitted)")]
     pub parent_id: Option<String>,
 
-    #[schemars(description = "Mailbox role (optional). Standard roles: archive, drafts, inbox, junk, sent, trash")]
+    #[schemars(
+        description = "Mailbox role (optional). Standard roles: archive, drafts, inbox, junk, sent, trash"
+    )]
     pub role: Option<String>,
+
+    #[schemars(description = ACCOUNT_PARAM)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -122,7 +146,9 @@ pub struct CreateAccountParams {
     #[schemars(description = "Disk quota in bytes (0 for unlimited)")]
     pub quota: Option<u64>,
 
-    #[schemars(description = "Permissions to grant at creation (e.g. ['email-send', 'authenticate', 'imap-authenticate']). Newly-created principals start with no permissions and cannot authenticate, send, or receive mail until permissions are granted. Use update_account_permissions afterwards if omitted here.")]
+    #[schemars(
+        description = "Permissions to grant at creation (e.g. ['email-send', 'authenticate', 'imap-authenticate']). Newly-created principals start with no permissions and cannot authenticate, send, or receive mail until permissions are granted. Use update_account_permissions afterwards if omitted here."
+    )]
     pub permissions: Option<Vec<String>>,
 }
 
@@ -131,10 +157,14 @@ pub struct UpdateAccountPermissionsParams {
     #[schemars(description = "Account name (e.g. 'hello@codechap.com')")]
     pub account: String,
 
-    #[schemars(description = "Action: 'set' replaces the full enabledPermissions list; 'add' grants the listed permissions; 'remove' revokes them. Default 'set'.")]
+    #[schemars(
+        description = "Action: 'set' replaces the full enabledPermissions list; 'add' grants the listed permissions; 'remove' revokes them. Default 'set'."
+    )]
     pub action: Option<String>,
 
-    #[schemars(description = "Permission names to set, add, or remove (e.g. ['email-send', 'authenticate', 'imap-authenticate', 'imap-append']).")]
+    #[schemars(
+        description = "Permission names to set, add, or remove (e.g. ['email-send', 'authenticate', 'imap-authenticate', 'imap-append'])."
+    )]
     pub permissions: Vec<String>,
 }
 
@@ -161,7 +191,9 @@ pub struct ResetPasswordParams {
     #[schemars(description = "Account name (e.g. 'hello@codechap.com')")]
     pub account: String,
 
-    #[schemars(description = "New password. If omitted, a strong 24-character random password is generated and returned.")]
+    #[schemars(
+        description = "New password. If omitted, a strong 24-character random password is generated and returned."
+    )]
     pub password: Option<String>,
 }
 
@@ -215,6 +247,12 @@ pub struct CheckSentParams {
                        Only enable for short-lived servers or when you know the filter is selective (e.g. a queueId)."
     )]
     pub use_server_filter: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OptionalAccountParams {
+    #[schemars(description = ACCOUNT_PARAM)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

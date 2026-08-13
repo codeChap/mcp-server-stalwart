@@ -2,14 +2,24 @@
 
 use rmcp::model::{CallToolResult, Content};
 use serde::Serialize;
+use std::time::Duration;
+
+pub const USER_AGENT: &str = concat!("mcp-server-stalwart/", env!("CARGO_PKG_VERSION"));
+
+pub fn http_client(connect_secs: u64, timeout_secs: u64) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(Duration::from_secs(connect_secs))
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+}
 
 /// Generate a random password from `/dev/urandom`.
 ///
 /// Uses a 64-character alphanumeric charset so modulo distribution is uniform.
 pub fn generate_password(len: usize) -> std::io::Result<String> {
     use std::io::Read;
-    const CHARS: &[u8] =
-        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
     let mut bytes = vec![0u8; len];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes
@@ -90,6 +100,9 @@ mod tests {
     fn generate_password_length() {
         let pw = generate_password(24).expect("urandom available");
         assert_eq!(pw.len(), 24);
-        assert!(pw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            pw.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 }

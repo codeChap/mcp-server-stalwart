@@ -22,9 +22,7 @@ pub fn parse_dsn_script(script: &str) -> Result<Vec<String>> {
         .collect();
 
     if accounts.is_empty() {
-        bail!(
-            "No email addresses found in DSN script.\nRaw script:\n{script}"
-        );
+        bail!("No email addresses found in DSN script.\nRaw script:\n{script}");
     }
 
     Ok(accounts)
@@ -112,11 +110,14 @@ if anyof(
 }
 "#;
         let accounts = parse_dsn_script(script).unwrap();
-        assert_eq!(accounts, vec![
-            "rose@thegrapevine.co.za",
-            "salesrose@thegrapevine.co.za",
-            "info@thegrapevine.co.za",
-        ]);
+        assert_eq!(
+            accounts,
+            vec![
+                "rose@thegrapevine.co.za",
+                "salesrose@thegrapevine.co.za",
+                "info@thegrapevine.co.za",
+            ]
+        );
     }
 
     #[test]

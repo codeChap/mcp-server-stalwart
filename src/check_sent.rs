@@ -27,14 +27,14 @@ pub struct ScanMeta {
 
 // Events that prove submission attempt, auth, or delivery outcome.
 const RELEVANT_EVENT_PREFIXES: &[&str] = &[
-    "delivery.",        // attempt, completed, delivered, failed, dsn-success, dsn-perm-fail
-    "queue.",           // queue-message-authenticated, rescheduled, etc.
-    "smtp.rcpt-to",     // submission RCPT
-    "smtp.mail-from",   // submission MAIL FROM
-    "smtp.message-",    // accepted / rejected
+    "delivery.",      // attempt, completed, delivered, failed, dsn-success, dsn-perm-fail
+    "queue.",         // queue-message-authenticated, rescheduled, etc.
+    "smtp.rcpt-to",   // submission RCPT
+    "smtp.mail-from", // submission MAIL FROM
+    "smtp.message-",  // accepted / rejected
     "smtp.data",
-    "auth.success",     // SMTP submission auth (proves the app's password worked)
-    "auth.failure",     // wrong password / bad credentials
+    "auth.success", // SMTP submission auth (proves the app's password worked)
+    "auth.failure", // wrong password / bad credentials
     "auth.error",
     "outgoing-report.",
     "tls-rpt.",
@@ -159,12 +159,9 @@ fn filter_items<'a>(items: &'a [Value], filters: &LogFilters<'_>) -> Vec<&'a Val
             }
         }
         if let Some(needle) = &from_needle {
+            // auth.success lines carry accountName=, not from= — both live in `details`
             if !details.contains(needle.as_str()) {
-                // auth.success lines carry accountName= not from= — still match account
-                // (preserved as in the original tool; both branches check the same needle)
-                if !(event_id.starts_with("auth.") && details.contains(needle.as_str())) {
-                    continue;
-                }
+                continue;
             }
         }
         if let Some(needle) = &extra_needle {
@@ -194,23 +191,20 @@ fn group_matched(matched: &[&Value]) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
                 "timestamp": timestamp,
                 "event_id": event_id,
                 "event": event,
-                "account": ACCOUNT_RE.captures(details).and_then(|c| c.get(1)).map(|m| m.as_str()),
+                "account": cap1(&ACCOUNT_RE, details),
                 "details": details,
             }));
             continue;
         }
 
-        let qid = QUEUE_ID_RE
-            .captures(details)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().to_string());
+        let qid = cap1(&QUEUE_ID_RE, details).map(str::to_string);
 
         let summary_event = json!({
             "timestamp": timestamp,
             "event_id": event_id,
             "event": event,
-            "code": CODE_RE.captures(details).and_then(|c| c.get(1)).map(|m| m.as_str()),
-            "hostname": HOST_RE.captures(details).and_then(|c| c.get(1)).map(|m| m.as_str()),
+            "code": cap1(&CODE_RE, details),
+            "hostname": cap1(&HOST_RE, details),
         });
 
         let Some(qid) = qid else {
@@ -223,7 +217,9 @@ fn group_matched(matched: &[&Value]) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
             continue;
         };
 
-        let group = groups.entry(qid.clone()).or_insert_with(|| new_group(&qid, details, timestamp));
+        let group = groups
+            .entry(qid.clone())
+            .or_insert_with(|| new_group(&qid, details, timestamp));
         update_group(group, details, timestamp, event_id, summary_event);
     }
 
@@ -231,21 +227,23 @@ fn group_matched(matched: &[&Value]) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
     (messages, auth_events, orphans)
 }
 
-fn new_group(qid: &str, details: &str, timestamp: &str) -> serde_json::Map<String, Value> {
-    let to_val = TO_RE
+fn cap1<'a>(re: &Regex, text: &'a str) -> Option<&'a str> {
+    re.captures(text).and_then(|c| c.get(1)).map(|m| m.as_str())
+}
+
+fn cap_to(details: &str) -> Option<&str> {
+    TO_RE
         .captures(details)
         .and_then(|c| c.get(1).or(c.get(2)))
-        .map(|m| m.as_str().trim().trim_matches('"').to_string());
+        .map(|m| m.as_str().trim().trim_matches('"'))
+}
+
+fn new_group(qid: &str, details: &str, timestamp: &str) -> serde_json::Map<String, Value> {
+    let to_val = cap_to(details).map(str::to_string);
 
     let mut m = serde_json::Map::new();
     m.insert("queue_id".into(), json!(qid));
-    m.insert(
-        "from".into(),
-        json!(FROM_RE
-            .captures(details)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str())),
-    );
+    m.insert("from".into(), json!(cap1(&FROM_RE, details)));
     m.insert("to".into(), json!(to_val));
     m.insert("events".into(), json!([]));
     m.insert("first_seen".into(), json!(timestamp));
@@ -287,19 +285,11 @@ fn update_group(
         .unwrap_or("")
         .is_empty()
     {
-        if let Some(f) = FROM_RE
-            .captures(details)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str())
-        {
+        if let Some(f) = cap1(&FROM_RE, details) {
             group.insert("from".into(), json!(f));
         }
     }
-    if let Some(t) = TO_RE
-        .captures(details)
-        .and_then(|c| c.get(1).or(c.get(2)))
-        .map(|m| m.as_str().trim().trim_matches('"'))
-    {
+    if let Some(t) = cap_to(details) {
         let existing = group
             .get("to")
             .and_then(|v| v.as_str())
@@ -340,18 +330,10 @@ fn update_group(
 }
 
 fn apply_mx_fields(group: &mut serde_json::Map<String, Value>, details: &str) {
-    if let Some(code) = CODE_RE
-        .captures(details)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str())
-    {
+    if let Some(code) = cap1(&CODE_RE, details) {
         group.insert("mx_code".into(), json!(code));
     }
-    if let Some(host) = HOST_RE
-        .captures(details)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str())
-    {
+    if let Some(host) = cap1(&HOST_RE, details) {
         group.insert("mx_hostname".into(), json!(host));
     }
 }
@@ -442,10 +424,7 @@ mod tests {
 
         assert_eq!(summary["messages_found"], 0);
         assert_eq!(summary["auth_events"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            summary["auth_events"][0]["account"],
-            "hello@codechap.com"
-        );
+        assert_eq!(summary["auth_events"][0]["account"], "hello@codechap.com");
     }
 
     #[test]

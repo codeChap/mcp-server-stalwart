@@ -27,6 +27,15 @@ The server connects via stdio and is configured through environment variables.
 | `JMAP_USERNAME` | JMAP account email address |
 | `JMAP_PASSWORD` | JMAP account password |
 
+### Optional (other mailboxes)
+
+Switch tools onto another mailbox with `account` (e.g. `hello@codechap.com`) without needing the admin API.
+
+| Variable | Description |
+|----------|-------------|
+| `JMAP_SECRETS_FILE` | Path to a mailman4 `secrets.toml` (`[passwords]` table of `"email" = "password"`) |
+| `JMAP_ACCOUNTS` | Inline `email=password;other@host=password` list (overrides file on clash) |
+
 ### Optional (admin API)
 
 | Variable | Description |
@@ -55,6 +64,7 @@ If an app (invoice mailer, WordPress, etc.) is configured with the admin passwor
         "JMAP_SESSION_URL": "https://mail.example.com/jmap/session",
         "JMAP_USERNAME": "you@example.com",
         "JMAP_PASSWORD": "your-password",
+        "JMAP_SECRETS_FILE": "/home/you/.local/share/mailman4/secrets.toml",
         "STALWART_ADMIN_URL": "https://mail.example.com",
         "STALWART_ADMIN_PASSWORD": "admin-password"
       }
@@ -68,6 +78,10 @@ If an app (invoice mailer, WordPress, etc.) is configured with the admin passwor
 ### get_mailboxes
 
 List all mailboxes/folders with message counts.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `account` | string | no | Mailbox to list (e.g. `hello@codechap.com`) |
 
 ### create_mailbox
 
@@ -92,6 +106,7 @@ Search emails with filters. Returns email IDs -- use `get_emails` to read full c
 | `mailbox_id` | string | no | Restrict to a specific mailbox |
 | `position` | number | no | Pagination offset (default 0) |
 | `limit` | number | no | Max results (default 10, max 50) |
+| `account` | string | no | Mailbox to search (e.g. `hello@codechap.com`) |
 
 ### get_emails
 
@@ -100,6 +115,7 @@ Get full email content by IDs. Returns subject, from, to, date, body text, and m
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `ids` | string[] | yes | List of email IDs to retrieve |
+| `account` | string | no | Mailbox that owns these emails |
 
 ### delete_emails
 
@@ -108,6 +124,7 @@ Permanently delete emails by ID. Cannot be undone.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `ids` | string[] | yes | List of email IDs to delete |
+| `account` | string | no | Mailbox to delete from |
 
 ### send_email
 
@@ -122,6 +139,7 @@ Send an email with optional HTML body and file attachments. When `html_body` is 
 | `cc` | string[] | no | CC recipients |
 | `bcc` | string[] | no | BCC recipients |
 | `attachments` | object[] | no | File attachments (see below) |
+| `account` | string | no | Send as this mailbox (e.g. `hello@codechap.com`) instead of the default JMAP user |
 
 **Attachment object:**
 

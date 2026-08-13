@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
-use std::time::Duration;
 
-const USER_AGENT: &str = "mcp-server-stalwart/0.1.0";
+use crate::util::http_client;
 
 #[derive(Clone)]
 pub struct AdminClient {
@@ -37,19 +36,11 @@ impl AdminClient {
         // Admin API calls (settings, principals) are small requests.
         // Without these timeouts a stalled connection to the Stalwart box hangs
         // the tool call — and the whole agent turn — indefinitely.
-        let http = Client::builder()
-            .user_agent(USER_AGENT)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let http = http_client(10, 30)?;
 
         // Log scans can be slow when the host is busy. Keep a separate client
         // with a longer timeout so principal/settings calls stay snappy.
-        let logs_http = Client::builder()
-            .user_agent(USER_AGENT)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(90))
-            .build()?;
+        let logs_http = http_client(10, 90)?;
 
         let client = Self {
             http,
@@ -71,6 +62,20 @@ impl AdminClient {
         format!("{}{}", self.api_url, path)
     }
 
+    async fn parse_get_body(
+        resp: reqwest::Response,
+        url: &str,
+        body_ctx: &'static str,
+        parse_ctx: &'static str,
+    ) -> Result<Value> {
+        let status = resp.status();
+        let body = resp.text().await.context(body_ctx)?;
+        if !status.is_success() {
+            anyhow::bail!("admin API returned {status} for GET {url}: {body}");
+        }
+        serde_json::from_str(&body).context(parse_ctx)
+    }
+
     /// GET that returns the full parsed JSON body (caller extracts fields).
     async fn get_raw(
         &self,
@@ -86,17 +91,13 @@ impl AdminClient {
             .send()
             .await
             .with_context(|| format!("admin API request failed (GET {url})"))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .context("failed to read admin API response body")?;
-        if !status.is_success() {
-            anyhow::bail!("admin API returned {status} for GET {url}: {body}");
-        }
-        let parsed: Value =
-            serde_json::from_str(&body).context("failed to parse admin API response")?;
+        let parsed = Self::parse_get_body(
+            resp,
+            &url,
+            "failed to read admin API response body",
+            "failed to parse admin API response",
+        )
+        .await?;
         Ok((url, parsed))
     }
 
@@ -237,18 +238,23 @@ impl AdminClient {
                 )
             })?;
 
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .context("failed to read admin API log response body")?;
-        if !status.is_success() {
-            anyhow::bail!("admin API returned {status} for GET {url}: {body}");
-        }
-        let resp: Value =
-            serde_json::from_str(&body).context("failed to parse admin API log response")?;
+        let parsed = Self::parse_get_body(
+            resp,
+            &url,
+            "failed to read admin API log response body",
+            "failed to parse admin API log response",
+        )
+        .await?;
+        Ok(parsed["data"].clone())
+    }
 
-        Ok(resp["data"].clone())
+    /// First password in a principal's `secrets` array (admin API account payload).
+    pub fn first_secret(details: &Value) -> Option<String> {
+        details["secrets"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
     }
 
     /// Insert or update settings via the admin API.
@@ -286,6 +292,7 @@ impl AdminClient {
 #[cfg(test)]
 mod tests {
     use super::AdminClient;
+    use serde_json::json;
 
     #[test]
     fn normalize_adds_api_suffix() {
@@ -309,5 +316,16 @@ mod tests {
             AdminClient::normalize_api_url("https://mail.example.com/api/"),
             "https://mail.example.com/api"
         );
+    }
+
+    #[test]
+    fn first_secret_reads_first_entry() {
+        let details = json!({"secrets": ["alpha", "beta"]});
+        assert_eq!(
+            AdminClient::first_secret(&details).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(AdminClient::first_secret(&json!({})), None);
+        assert_eq!(AdminClient::first_secret(&json!({"secrets": []})), None);
     }
 }
